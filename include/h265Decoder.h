@@ -52,7 +52,10 @@ private:
 
     FILE *fSink;
     FILE *fRawSink;
+    FILE *fRawSink1;
 
+    mfxU16 width,height;
+    bool resolutionChanged;
     bool initFinish;
 
 };
