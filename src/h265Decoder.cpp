@@ -173,7 +173,7 @@ void h265Decoder::decodeBuffer ()
 
 int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codeced)
 {
-    printf("decode \n");
+//    printf("decode \n");
 #ifdef SAVE_CODECED
     fwrite(codeced.buffer, 1, static_cast<size_t>(codeced.size), fSink);
 #endif
@@ -207,6 +207,8 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
         // - Frame surface array keeps pointers all surface planes and general frame info
         // - For HEVC 10 bit, the bytes per pixel is doubled, so the width is multiplied by 2.
         width = (mfxU16) MSDK_ALIGN32(Request.Info.Width);
+//        width = (mfxU16) MSDK_ALIGN32(1920);
+//        height = (mfxU16) MSDK_ALIGN32(1080);
         height = (mfxU16) MSDK_ALIGN32(Request.Info.Height);
         mfxU8 bitsPerPixel = 12; // Note: YUV P010 format is a 24 bits per pixel format, but we have doubled the width
         mfxU32 surfaceSize = width * height * bitsPerPixel / 8;
@@ -275,8 +277,15 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
     // Decode a frame asychronously (returns immediately)
     //  - If input bitstream contains multiple frames DecodeFrameAsync will start decoding multiple frames, and remove them from bitstream
     sts = mfxDEC->DecodeFrameAsync(&mfxBS, pmfxSurfaces[nIndex], &pmfxOutSurface, &syncp);
-    std::cout<<"first decode result: "<<sts<<std::endl;
+//    std::cout << "first decode result: " << sts << std::endl;
 //    std::cout<<pmfxOutSurface->Info.CropW<<" "<<pmfxOutSurface->Info.CropH<<std::endl;
+    if(MFX_WRN_VIDEO_PARAM_CHANGED==sts || MFX_ERR_INCOMPATIBLE_VIDEO_PARAM==sts)
+    {
+        mfxVideoParam tmpparam;
+        memset(&tmpparam,0,sizeof(tmpparam));
+        mfxDEC->GetVideoParam(&tmpparam);
+        printf("sts:%d , tmpparam:%d %d\n", sts, tmpparam.mfx.FrameInfo.CropW, tmpparam.mfx.FrameInfo.CropH);
+    }
 
     // Ignore warnings if output is available,
     // if no output and no action required just repeat the DecodeFrameAsync call
@@ -298,15 +307,15 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 //        Y
         for (int i = 0; i < pInfo->CropH; i ++)
         {
-            memcpy((void*)(raw.buffer+offset),pData->Y+offset1,pInfo->CropW);
+            memcpy((void *) (raw.buffer + offset), pData->Y + offset1, pInfo->CropW);
             offset += pInfo->CropW;
             offset1 += pData->Pitch;
         }
         offset1 = 0;
 //            offset = pInfo->CropH * pInfo->CropW;
-        for (int i = 0; i < pInfo->CropH/2; i ++)
+        for (int i = 0; i < pInfo->CropH / 2; i ++)
         {
-            memcpy((void*)(raw.buffer+offset),pData->UV+offset1,pInfo->CropW);
+            memcpy((void *) (raw.buffer + offset), pData->UV + offset1, pInfo->CropW);
             offset += pInfo->CropW;
             offset1 += pData->Pitch;
         }
@@ -350,12 +359,12 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 
     // MFX_ERR_MORE_DATA means that file has ended, need to go to buffering loop, exit in case of other errors
     MSDK_IGNORE_MFX_STS(sts, MFX_ERR_MORE_DATA);
-    MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
+//    MSDK_CHECK_RESULT(sts, MFX_ERR_NONE, sts);
 
     //
     // Stage 2: Retrieve the buffered decoded frames
     //
-    while (MFX_ERR_NONE <= sts || MFX_ERR_MORE_SURFACE == sts)
+//    while (MFX_ERR_NONE <= sts || MFX_ERR_MORE_SURFACE == sts)
     {
         if (MFX_WRN_DEVICE_BUSY == sts) MSDK_SLEEP(
                 1);  // Wait if device is busy, then repeat the same call to DecodeFrameAsync
@@ -365,7 +374,7 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 
         // Decode a frame asychronously (returns immediately)
         sts = mfxDEC->DecodeFrameAsync(nullptr, pmfxSurfaces[nIndex], &pmfxOutSurface, &syncp);
-        std::cout<<"rest decode result: "<<sts<<std::endl;
+//        std::cout << "rest decode result: " << sts << std::endl;
 //        std::cout<<pmfxOutSurface->Info.CropW<<" "<<pmfxOutSurface->Info.CropH<<std::endl;
 
         // Ignore warnings if output is available,
@@ -388,15 +397,15 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 //        Y
             for (int i = 0; i < pInfo->CropH; i ++)
             {
-                memcpy((void*)(raw.buffer+offset),pData->Y+offset1,pInfo->CropW);
+                memcpy((void *) (raw.buffer + offset), pData->Y + offset1, pInfo->CropW);
                 offset += pInfo->CropW;
                 offset1 += pData->Pitch;
             }
             offset1 = 0;
 //            offset = pInfo->CropH * pInfo->CropW;
-            for (int i = 0; i < pInfo->CropH/2; i ++)
+            for (int i = 0; i < pInfo->CropH / 2; i ++)
             {
-                memcpy((void*)(raw.buffer+offset),pData->UV+offset1,pInfo->CropW);
+                memcpy((void *) (raw.buffer + offset), pData->UV + offset1, pInfo->CropW);
                 offset += pInfo->CropW;
                 offset1 += pData->Pitch;
             }
