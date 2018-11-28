@@ -35,7 +35,7 @@ if (${USE_INTEL} STREQUAL "ON")
     link_directories(/opt/intel/mediasdk/lib/lin_x64)
 
     add_executable(Decoder main.cpp ${INTEL_COMMON} ${DIR_SRCS})
-    target_link_libraries(Decoder libmfx.a libva.so libva-drm.so dl rt  ${Boost_LIBRARIES} pthread)
+    target_link_libraries(Decoder libmfx.a libva.so libva-drm.so dl rt Qt5Core  ${Boost_LIBRARIES} pthread)
 
 else (${USE_INTEL} STREQUAL "ON")
 

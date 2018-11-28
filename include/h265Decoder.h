@@ -36,6 +36,8 @@ private:
 
     int decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codeced);
 
+    void reallocate();
+
 private:
 
     mfxStatus sts;

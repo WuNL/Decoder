@@ -14,7 +14,10 @@ void h265Decoder::run ()
     pthread_create(&pthreadId_, nullptr, &h265Decoder::start, static_cast<void *>(this));
 }
 
-h265Decoder::h265Decoder (initParams p) : decoder(std::move(p)), mfxDEC(nullptr), initFinish(false)
+h265Decoder::h265Decoder (initParams p) : decoder(std::move(p)), mfxDEC(nullptr), width(static_cast<mfxU16>(p.v_width)),
+                                          height(
+                                                  static_cast<mfxU16>(p.v_height)),
+                                          initFinish(false)
 {
 
 }
@@ -41,7 +44,7 @@ int h265Decoder::initDecoder ()
     memset(&options, 0, sizeof(CmdOptions));
     options.ctx.options = OPTIONS_DECODE;
     // Set default values:
-    options.values.impl = MFX_IMPL_AUTO_ANY;
+    options.values.impl = MFX_IMPL_HARDWARE;
 
     // 2. Initialize Intel Media SDK session
     // - MFX_IMPL_AUTO_ANY selects HW acceleration if available (on any adapter)
@@ -64,6 +67,11 @@ int h265Decoder::initDecoder ()
     mfxVideoParams.mfx.CodecId = MFX_CODEC_HEVC; //The codecId must be set to HEVC in order to load the plugin
     mfxVideoParams.IOPattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
     mfxVideoParams.AsyncDepth = 1;
+
+    mfxVideoParams.mfx.FrameInfo.Width = MSDK_ALIGN32(width);
+    mfxVideoParams.mfx.FrameInfo.Height = MSDK_ALIGN32(height);
+    mfxVideoParams.mfx.FrameInfo.CropW = width;
+    mfxVideoParams.mfx.FrameInfo.CropH = height;
 
     // 4. Load the HEVC plugin
     mfxPluginUID codecUID;
@@ -210,8 +218,9 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 //        width = (mfxU16) MSDK_ALIGN32(1920);
 //        height = (mfxU16) MSDK_ALIGN32(1080);
         height = (mfxU16) MSDK_ALIGN32(Request.Info.Height);
+        printf("%d %d\n", width, height);
         mfxU8 bitsPerPixel = 12; // Note: YUV P010 format is a 24 bits per pixel format, but we have doubled the width
-        mfxU32 surfaceSize = width * height * bitsPerPixel / 8;
+        auto surfaceSize = static_cast<mfxU32>(width * height * bitsPerPixel / 8);
         surfaceBuffers = (mfxU8 *) new mfxU8[surfaceSize * numSurfaces];
 
         // Allocate surface headers (mfxFrameSurface1) for decoder, noticed the width has been doubled for P010.
@@ -277,14 +286,16 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
     // Decode a frame asychronously (returns immediately)
     //  - If input bitstream contains multiple frames DecodeFrameAsync will start decoding multiple frames, and remove them from bitstream
     sts = mfxDEC->DecodeFrameAsync(&mfxBS, pmfxSurfaces[nIndex], &pmfxOutSurface, &syncp);
-//    std::cout << "first decode result: " << sts << std::endl;
-//    std::cout<<pmfxOutSurface->Info.CropW<<" "<<pmfxOutSurface->Info.CropH<<std::endl;
-    if(MFX_WRN_VIDEO_PARAM_CHANGED==sts || MFX_ERR_INCOMPATIBLE_VIDEO_PARAM==sts)
+    if (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM == sts)
     {
         mfxVideoParam tmpparam;
-        memset(&tmpparam,0,sizeof(tmpparam));
+        memset(&tmpparam, 0, sizeof(tmpparam));
         mfxDEC->GetVideoParam(&tmpparam);
         printf("sts:%d , tmpparam:%d %d\n", sts, tmpparam.mfx.FrameInfo.CropW, tmpparam.mfx.FrameInfo.CropH);
+
+        reallocate();
+        initFinish = false;
+        return 0;
     }
 
     // Ignore warnings if output is available,
@@ -324,8 +335,6 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
         raw.height = pInfo->CropH;
         raw.size = pmfxOutSurface->Info.CropW * pmfxOutSurface->Info.CropH * 3 / 2;
 
-//        printf("First Frame number: %d %d %d\n", nFrame, raw.width, raw.height);
-//        fflush(stdout);
         return 0;
 #ifdef SAVE_RAW
         sts = WriteRawFrame(pmfxOutSurface, fRawSink);
@@ -364,67 +373,58 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
     //
     // Stage 2: Retrieve the buffered decoded frames
     //
-//    while (MFX_ERR_NONE <= sts || MFX_ERR_MORE_SURFACE == sts)
+    if (MFX_WRN_DEVICE_BUSY == sts) MSDK_SLEEP(
+            1);  // Wait if device is busy, then repeat the same call to DecodeFrameAsync
+
+    nIndex = GetFreeSurfaceIndex(pmfxSurfaces, numSurfaces);        // Find free frame surface
+    MSDK_CHECK_ERROR(MFX_ERR_NOT_FOUND, nIndex, MFX_ERR_MEMORY_ALLOC);
+
+    // Decode a frame asychronously (returns immediately)
+    sts = mfxDEC->DecodeFrameAsync(nullptr, pmfxSurfaces[nIndex], &pmfxOutSurface, &syncp);
+
+    // Ignore warnings if output is available,
+    // if no output and no action required just repeat the DecodeFrameAsync call
+    if (MFX_ERR_NONE < sts && syncp)
+        sts = MFX_ERR_NONE;
+
+    if (MFX_ERR_NONE == sts)
+        sts = session.SyncOperation(syncp, 60000);      // Synchronize. Waits until decoded frame is ready
+
+    if (MFX_ERR_NONE == sts)
     {
-        if (MFX_WRN_DEVICE_BUSY == sts) MSDK_SLEEP(
-                1);  // Wait if device is busy, then repeat the same call to DecodeFrameAsync
+        ++ nFrame;
 
-        nIndex = GetFreeSurfaceIndex(pmfxSurfaces, numSurfaces);        // Find free frame surface
-        MSDK_CHECK_ERROR(MFX_ERR_NOT_FOUND, nIndex, MFX_ERR_MEMORY_ALLOC);
+        mfxFrameInfo *pInfo = &pmfxOutSurface->Info;
+        mfxFrameData *pData = &pmfxOutSurface->Data;
 
-        // Decode a frame asychronously (returns immediately)
-        sts = mfxDEC->DecodeFrameAsync(nullptr, pmfxSurfaces[nIndex], &pmfxOutSurface, &syncp);
-//        std::cout << "rest decode result: " << sts << std::endl;
-//        std::cout<<pmfxOutSurface->Info.CropW<<" "<<pmfxOutSurface->Info.CropH<<std::endl;
-
-        // Ignore warnings if output is available,
-        // if no output and no action required just repeat the DecodeFrameAsync call
-        if (MFX_ERR_NONE < sts && syncp)
-            sts = MFX_ERR_NONE;
-
-        if (MFX_ERR_NONE == sts)
-            sts = session.SyncOperation(syncp, 60000);      // Synchronize. Waits until decoded frame is ready
-
-        if (MFX_ERR_NONE == sts)
-        {
-            ++ nFrame;
-
-            mfxFrameInfo *pInfo = &pmfxOutSurface->Info;
-            mfxFrameData *pData = &pmfxOutSurface->Data;
-
-            uint32_t offset = 0;
-            uint32_t offset1 = 0;
+        uint32_t offset = 0;
+        uint32_t offset1 = 0;
 //        Y
-            for (int i = 0; i < pInfo->CropH; i ++)
-            {
-                memcpy((void *) (raw.buffer + offset), pData->Y + offset1, pInfo->CropW);
-                offset += pInfo->CropW;
-                offset1 += pData->Pitch;
-            }
-            offset1 = 0;
+        for (int i = 0; i < pInfo->CropH; i ++)
+        {
+            memcpy((void *) (raw.buffer + offset), pData->Y + offset1, pInfo->CropW);
+            offset += pInfo->CropW;
+            offset1 += pData->Pitch;
+        }
+        offset1 = 0;
 //            offset = pInfo->CropH * pInfo->CropW;
-            for (int i = 0; i < pInfo->CropH / 2; i ++)
-            {
-                memcpy((void *) (raw.buffer + offset), pData->UV + offset1, pInfo->CropW);
-                offset += pInfo->CropW;
-                offset1 += pData->Pitch;
-            }
+        for (int i = 0; i < pInfo->CropH / 2; i ++)
+        {
+            memcpy((void *) (raw.buffer + offset), pData->UV + offset1, pInfo->CropW);
+            offset += pInfo->CropW;
+            offset1 += pData->Pitch;
+        }
 
-            raw.width = pInfo->CropW;
-            raw.height = pInfo->CropH;
-            raw.size = pmfxOutSurface->Info.CropW * pmfxOutSurface->Info.CropH * 3 / 2;
-
-//            printf("rest Frame number: %d %d %d\n", nFrame, raw.width, raw.height);
-//            fflush(stdout);
-
+        raw.width = pInfo->CropW;
+        raw.height = pInfo->CropH;
+        raw.size = pmfxOutSurface->Info.CropW * pmfxOutSurface->Info.CropH * 3 / 2;
 
 #ifdef SAVE_RAW
-            sts = WriteRawFrame(pmfxOutSurface, fRawSink);
+        sts = WriteRawFrame(pmfxOutSurface, fRawSink);
 //            fwrite(raw.buffer, 1, static_cast<size_t>(raw.size), fRawSink);
 //            printf("rest Frame number: %d %d %d\n", nFrame, raw.width, raw.height);
 //            fflush(stdout);
 #endif
-        }
     }
 
     // MFX_ERR_MORE_DATA indicates that all buffers has been fetched, exit in case of other errors
@@ -437,4 +437,25 @@ int h265Decoder::decodeBuffer (raw_video_buffer &raw, coded_video_buffer &codece
 bool h265Decoder::initialized ()
 {
     return mfxDEC != nullptr;
+}
+
+void h265Decoder::reallocate ()
+{
+    printf("~h265Decoder\n");
+
+    if (mfxDEC)
+        mfxDEC->Close();
+    delete mfxDEC;
+    MSDK_SAFE_DELETE_ARRAY(mfxBS.Data);
+
+    for (int i = 0; i < numSurfaces; i ++)
+        delete pmfxSurfaces[i];
+    MSDK_SAFE_DELETE_ARRAY(pmfxSurfaces);
+    MSDK_SAFE_DELETE_ARRAY(mfxBS.Data);
+
+    MSDK_SAFE_DELETE_ARRAY(surfaceBuffers);
+
+    Release();
+
+    initDecoder();
 }
